@@ -446,7 +446,11 @@ def func_metadata(
     else:
         original_annotation = effective_annotation
 
-    if structured_output is None and (return_type_expr in (list, tuple) or _returns_content(return_type_expr)):
+    return_type_origin = get_origin(return_type_expr) or return_type_expr
+    return_type_args = get_args(return_type_expr)
+    if structured_output is None and (
+        (return_type_origin in (list, tuple) and not return_type_args) or _returns_content(return_type_expr)
+    ):
         # Content blocks and the Image/Audio helpers are what the model reads, not data for the
         # application: a derived schema would advertise the block's own model as output_schema (and,
         # unless the tool builds its own CallToolResult, echo every block into structured_content).
@@ -512,11 +516,16 @@ def _create_output_model(original_annotation: Any, type_expr: Any, func_name: st
         model = _create_wrapped_model(func_name, original_annotation)
         wrap_output = True
 
-    # Handle parameterized generics (list[str], typing.Dict[str, int], Union[str, int], etc.)
-    elif (origin := get_origin(type_expr)) is not None:
+    # Normalize expression to concrete origin and args upfront
+    else:
+        origin = get_origin(type_expr) or type_expr
+        args = get_args(type_expr)
+
         if origin is dict:
-            args = get_args(type_expr)
-            if len(args) == 2 and args[0] is str:
+            if not args:
+                # Bare dict or typing.Dict is a JSON object already, like dict[str, Any]
+                model = dict[str, Any]
+            elif len(args) == 2 and args[0] is str:
                 # TODO: should we use the original annotation? We are losing any potential `Annotated`
                 # metadata for Pydantic here:
                 model = type_expr
@@ -524,44 +533,42 @@ def _create_output_model(original_annotation: Any, type_expr: Any, func_name: st
                 # dict with non-str keys needs wrapping
                 model = _create_wrapped_model(func_name, original_annotation)
                 wrap_output = True
-        else:
+
+        # Handle parameterized generics (list[str], Union[str, int], etc.)
+        elif get_origin(type_expr) is not None:
             # All other generic types need wrapping (list, tuple, Union, Optional, etc.)
             model = _create_wrapped_model(func_name, original_annotation)
             wrap_output = True
 
-    # Handle regular type objects
-    elif isinstance(type_expr, type):
-        type_annotation = cast(type[Any], type_expr)
+        # Handle regular type objects
+        elif isinstance(type_expr, type):
+            type_annotation = cast(type[Any], type_expr)
 
-        # Case 1: BaseModel subclasses (can be used directly)
-        if issubclass(type_annotation, BaseModel):
-            model = type_annotation
+            # Case 1: BaseModel subclasses (can be used directly)
+            if issubclass(type_annotation, BaseModel):
+                model = type_annotation
 
-        # Case 2: TypedDicts (pydantic reads qualifiers, totality, docstring and `Annotated` metadata natively)
-        elif is_typeddict(type_annotation):
-            model = type_annotation
+            # Case 2: TypedDicts (pydantic reads qualifiers, totality, docstring and `Annotated` metadata natively)
+            elif is_typeddict(type_annotation):
+                model = type_annotation
 
-        # Case 3: A bare dict is a JSON object already, like dict[str, Any]
-        elif type_annotation is dict:
-            model = dict[str, Any]
+            # Case 3: Primitive types and bare collections that need wrapping
+            elif type_annotation in (str, int, float, bool, bytes, type(None), list, tuple, set, frozenset):
+                model = _create_wrapped_model(func_name, original_annotation)
+                wrap_output = True
 
-        # Case 4: Primitive types and bare collections that need wrapping
-        elif type_annotation in (str, int, float, bool, bytes, type(None), list, tuple, set, frozenset):
+            # Case 4: Other class types (dataclasses, regular classes with annotations)
+            else:
+                type_hints = get_type_hints(type_annotation)
+                if type_hints:
+                    # Classes with type hints can be converted to Pydantic models
+                    model = _create_model_from_class(type_annotation, type_hints)
+                # Classes without type hints are not serializable - model remains None
+
+        # Handle any other types not covered above
+        else:
             model = _create_wrapped_model(func_name, original_annotation)
             wrap_output = True
-
-        # Case 5: Other class types (dataclasses, regular classes with annotations)
-        else:
-            type_hints = get_type_hints(type_annotation)
-            if type_hints:
-                # Classes with type hints can be converted to Pydantic models
-                model = _create_model_from_class(type_annotation, type_hints)
-            # Classes without type hints are not serializable - model remains None
-
-    # Handle any other types not covered above
-    else:
-        model = _create_wrapped_model(func_name, original_annotation)
-        wrap_output = True
 
     return model, wrap_output
 

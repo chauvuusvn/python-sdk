@@ -1102,6 +1102,77 @@ def test_a_bare_dict_is_structured_like_dict_str_any():
     )
 
 
+@pytest.mark.parametrize(
+    "annotation",
+    [dict, dict[str, Any], typing.Dict, typing.Dict[str, Any]],  # noqa: UP006
+)
+def test_dict_spelling_parity(annotation: Any):
+    """(dict, dict[str, Any], typing.Dict, typing.Dict[str, Any]) must all produce
+    identical output_schema and identical serialization behaviour without wrapping."""
+
+    def fn() -> annotation:  # type: ignore
+        return {"key": "val"}
+
+    meta = func_metadata(fn)
+    assert meta.wrap_output is False
+    assert meta.output_schema == {"additionalProperties": True, "type": "object"}
+    result = meta.convert_result({"key": "val"})
+    assert isinstance(result, CallToolResult)
+    assert result.structured_content == {"key": "val"}
+
+
+@pytest.mark.parametrize(
+    ("annotation", "sample_val", "expected_structured"),
+    [
+        (list[str], ["a", "b"], {"result": ["a", "b"]}),
+        (typing.List[str], ["a", "b"], {"result": ["a", "b"]}),  # noqa: UP006
+        (tuple[str, ...], ("a", "b"), {"result": ["a", "b"]}),
+        (typing.Tuple[str, ...], ("a", "b"), {"result": ["a", "b"]}),  # noqa: UP006
+    ],
+)
+def test_sequence_spelling_parity(annotation: Any, sample_val: Any, expected_structured: Any):
+    """list and tuple spellings must produce identical schema and wrapped serialization behaviour."""
+
+    def fn() -> annotation:  # type: ignore
+        return sample_val
+
+    meta = func_metadata(fn)
+    assert meta.wrap_output is True
+    assert meta.output_schema == {
+        "properties": {"result": {"items": {"type": "string"}, "type": "array"}},
+        "required": ["result"],
+        "type": "object",
+    }
+    result = meta.convert_result(sample_val)
+    assert isinstance(result, CallToolResult)
+    assert result.structured_content == expected_structured
+
+
+@pytest.mark.parametrize(
+    ("annotation", "expect_output_model"),
+    [
+        (list, False),
+        (typing.List, False),  # noqa: UP006
+        (tuple, False),
+        (typing.Tuple, False),  # noqa: UP006
+        (list[int], True),
+        (typing.List[int], True),  # noqa: UP006
+        (tuple[int, ...], True),
+        (typing.Tuple[int, ...], True),  # noqa: UP006
+    ],
+)
+def test_collection_opt_out_gate_invariant(annotation: Any, expect_output_model: bool):
+    """Invariant test for the opt-out gate:
+    For every collection C in (list, tuple), bare C and typing.C must both leave
+    output_model as None, while C[T] for any concrete T must produce an output model."""
+
+    def fn() -> annotation:  # type: ignore
+        return ...
+
+    meta = func_metadata(fn)
+    assert (meta.output_model is not None) is expect_output_model
+
+
 def _returns_bare_set() -> set:
     return {1}
 
